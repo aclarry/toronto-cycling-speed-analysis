@@ -1,36 +1,38 @@
 #!/usr/bin/env python
-"""Module for joining route attributes to GPS point data
+"""Script for processing CSVs of GPS point data into CSVs matched to route links
 
 Author: Andrew Clarry
 Date: 14/06/16
 """
 
-import datetime
-import multiprocessing
 import os
 import shutil
-import time
+import datetime as dt
+import traceback
 
 import arcpy
 import arcgisscripting
 
+
+SPATIAL_REF = arcpy.SpatialReference("WGS 1984")
 gp = arcgisscripting.create(9.3)
 arcpy.env.overwriteOutput = True
 arcpy.CheckOutExtension("Network")
 
-ROOT_FOLDER = r"C:\Users\ITSLab\My Documents\Andrew Summer 2016\Sample Route Data"
-SPEED_DATA_FOLDER = r"C:\users\ITSLab\My Documents\Andrew Summer 2016\Speed Analysis\Joined Data"
+DATA_FOLDER = r"C:\Users\Andrew\Documents\UofT2016\Speed Analysis\toronto-cycling-speed-analysis\Data"
+INPUT_DIR = os.path.join(DATA_FOLDER, "Cut Data")
+OUTPUT_CSV_FOLDER = os.path.join(DATA_FOLDER, "Geoprocessed Data", "Processed CSVs")
+SF_DIR = os.path.join(DATA_FOLDER, "Geoprocessed Data", "Shapefiles")
 
-NETWORK_GDB = ROOT_FOLDER + r"\Network_with_Emme\Centreline_withEMME.gdb"
-NETWORK_DATASET = NETWORK_GDB + r"\Network\Network_forCS"
-CENTRELINE_LINKS = NETWORK_GDB + r"\Network\Links"
+NETWORK_GDB = r"D:\UofT 2016\Kathryn Choiceset Generation\Network_with_Emme\CalibratedNetworkJuly26\CalibratedNetworkJuly26.gdb"
+NETWORK_DATASET = NETWORK_GDB + r"\dataset\dataset_ND"
+CENTRELINE_LINKS = NETWORK_GDB + r"\dataset\Calibrated_July26"
 SIGNALIZED_INTERSECTION_PATH = NETWORK_GDB + r"\Centreline_JunctionswithSignals"
 
-ACCUMULATORS = ("Meters", "Minutes", "Slope_Time", "High_Slope", "Bike_Attr",
-                "Left", "Right", "Intersections", "sCar")
+ACCUMULATORS = ("Meters",)
 
 
-def solve_trip(observed_points, od_points, trip_id, results_folder):
+def solve_trip(observed_points, od_points, trip_id, results_folder, BUFF_SIZE=50):
     """Solves an observed route and returns the split result
 
     Solves a route bounded by a buffer around the observed points, and
@@ -44,15 +46,16 @@ def solve_trip(observed_points, od_points, trip_id, results_folder):
     results_folder: The path of the folder that output should be put in
     """
     
-    print "Create Buffer of 50 meters"
-    points_Buffer = ROOT_FOLDER+ r"\Buffer\buffer.gdb\buffer"+trip_id
-    points_buffer_line = ROOT_FOLDER+ r"\buffer\buffer.gdb\buffer_line"+trip_id
-    arcpy.analysis.Buffer(observed_points, points_Buffer, "50 Meters", "FULL", "ROUND", "ALL", "")
-    arcpy.management.PolygonToLine(points_Buffer, points_buffer_line,"IDENTIFY_NEIGHBORS")
+    print("Creating %dm buffer" % BUFF_SIZE)
+    points_buffer = r"in_memory\buffer"+trip_id
+    points_buffer_line = r"in_memory\buffer_line"+trip_id
+    arcpy.analysis.Buffer(observed_points, points_buffer, "%d Meters" % BUFF_SIZE,
+                          "FULL", "ROUND", "ALL", "")
+    arcpy.management.PolygonToLine(points_buffer, points_buffer_line,"IDENTIFY_NEIGHBORS")
 
-    print "Generate Observed Route"
+    print("Generating observed route")
     path_name = "CS_"+trip_id+"_obs"
-    NALayer = os.path.join(results_folder, path_name+".lyr")
+    NALayer = os.path.join(SF_DIR, path_name+".lyr")
     arcpy.na.MakeRouteLayer(NETWORK_DATASET, NALayer, "Meters", "USE_INPUT_ORDER", 
             "PRESERVE_BOTH", "NO_TIMEWINDOWS", ACCUMULATORS, "ALLOW_UTURNS", 
             "Oneway", "#", "", "TRUE_LINES_WITH_MEASURES", "")
@@ -64,20 +67,27 @@ def solve_trip(observed_points, od_points, trip_id, results_folder):
             "MATCH_TO_CLOSEST", "APPEND", "NO_SNAP", "5 Meters", "INCLUDE", 
             "Links #;Network_forCS_Junctions #")
 
-    obs_path_name = os.path.join(results_folder, trip_id+"_observed_route.shp")
+    obs_path_name = os.path.join(SF_DIR, trip_id+"_observed_route.shp")
     try:
         split_route = get_split_solved_route(NALayer, obs_path_name, results_folder, trip_id, 
                 copy_id="OBJECTID_12")
     except:
-        print "\nObserved route %s could not be solved" % path_name
-        with open(os.path.join(SPEED_DATA_FOLDER, "trip_errors.txt"),"a") as file_name:
-            file_name.write(str(trip_id)+"\n")
+        if BUFF_SIZE == 50:
+            solve_trip(observed_points, od_points, trip_id, results_folder, BUFF_SIZE=100)
+            return
+        print "ERROR: Observed route %s could not be solved" % path_name
         return
     finally:
-        gp.delete_management(NALayer)
+        arcpy.management.Delete(NALayer)
+        arcpy.management.Delete(points_buffer)
+        arcpy.management.Delete(points_buffer_line)
 
-    match_route_direction(split_route)
-    out_points_name = os.path.join(results_folder, trip_id+"_points.shp")
+    try:
+        match_route_direction(split_route)
+    except KeyError:
+        return
+    
+    out_points_name = os.path.join(SF_DIR, trip_id+"_points.shp")
     arcpy.analysis.SpatialJoin(observed_points, split_route, out_points_name,
                                join_operation="JOIN_ONE_TO_ONE",
                                join_type="KEEP_ALL",
@@ -95,7 +105,7 @@ def add_intersection_distances(observed_points, route, junction_file):
                         join_operation="JOIN_ONE_TO_ONE",
                         join_type="KEEP_COMMON",
                         match_option="WITHIN_A_DISTANCE", search_radius="5 Meters")
-    arcpy.analysis.Near(observed_points, route_intersections)
+    arcpy.analysis.Near(observed_points, route_intersections, method="GEODESIC")
     arcpy.management.Delete(route_intersections)
     arcpy.management.AddField(observed_points, "sig_dist", "DOUBLE")
     arcpy.management.CalculateField(observed_points, "sig_dist",
@@ -117,7 +127,7 @@ def get_split_solved_route(na_layer, split_route_output, results_folder, trip_id
     print "Solve and split route"
     try:
         traversed_features = None
-        temp_split = ROOT_FOLDER + r"\buffer\buffer.gdb"
+        temp_split = "in_memory"
         traversed_features = arcpy.na.CopyTraversedSourceFeatures(na_layer, temp_split)
         edges_name, junctions_name, turns_name = [traversed_features.getOutput(i) for i in range(0,3)]
         gp.copyfeatures_management(edges_name, split_route_output)
@@ -145,11 +155,12 @@ def match_route_direction(route):
     
     for i in range(0, len(nodes)-1):
         shared_junct = _get_shared_junction(nodes[i]['FNODE'], nodes[i]['TNODE'],
-                                            nodes[i+1]['FNODE'], nodes[i+1]['TNODE'])
+                                            nodes[i+1]['FNODE'], nodes[i+1]['TNODE']) 
         if nodes[i]['TNODE'] == shared_junct:
             nodes[i]['link_dir'] = 1
         else: 
             nodes[i]['link_dir'] = -1
+            
     shared_junct = _get_shared_junction(nodes[-1]['FNODE'], nodes[-1]['TNODE'],
                                         nodes[-2]['FNODE'], nodes[-2]['TNODE'])
     if nodes[-1]['FNODE'] == shared_junct:
@@ -171,78 +182,62 @@ def export_features_to_csv(split_route, out_csv_name):
     """Saves relevant trip features to a CSV"""
     print("Appending information to route")
 
-    gps_fields = ";".join(("longitude", "latitude", "altitude", "speed", "h_acc",
-                           "v_acc", "recorded_a"))
+    gps_fields = ";".join(("longitude", "latitude", "altitude", "speed", "hort_accur",
+                           "vert_accur", "started_at", "recorded_a"))
     user_fields = ";".join(("app_user_i", "winter", "rider_hist", "workzip", "income",
                           "cyclingfre", "age", "cycling_le", "gender", "rider_type",
                           "schoolzip", "homezip", "cyclingexp"))
-    trip_fields = ";".join(("purpose", "SortID", "Cumul_Mete"))
-    road_fields = ";".join(("LF_NAME", "ONE_WAY_DI", "SPD_KM", "sig_dist",
-                            "SLOPE_TF", "StreetC_Ev", "Shape_Leng",
+    trip_fields = ";".join(("purpose", "FID", "Cumul_Mete"))
+    road_fields = ";".join(("LF_NAME", "ONE_WAY_DI", "sig_dist", "SourceOID",
+                            "SLOPE_TF", "Shape_Leng", "RDCLASS", "Bike_Class",
                             "Bike_Code", "EMME_MATCH", "EMME_CONTR", "link_dir"))
     fields = ";".join((gps_fields, user_fields, trip_fields, road_fields))
     arcpy.ExportXYv_stats(split_route, fields, "COMMA", out_csv_name, "ADD_FIELD_NAMES") 
 
-def process_date(date):
-    """Processes all the trips from a particular date"""
-    source_date_folder = os.path.join(ROOT_FOLDER, "Shapefiles", date)
-    if not os.path.exists(source_date_folder):
-        continue
-    arcpy.env.workspace = source_date_folder
 
-    date_folder = os.path.join(SPEED_DATA_FOLDER, date)
-    if not os.path.exists(date_folder):
-        os.makedirs(date_folder)
+def csv_to_shapefiles(trip_id):
+    "Converts an input CSV file into shapefiles of all points and origin-destination points"
+    all_csv = os.path.join(INPUT_DIR, "%s.csv" %trip_id)
+    od_csv = os.path.join(INPUT_DIR, "%s_od.csv" %trip_id) 
+    all_name = "ALL_%s.shp" % trip_id
+    od_name = "OD_%s.shp" % trip_id
 
-    trip_dirs = next(os.walk(source_date_folder))[1]
-    for trip_id in trip_dirs:
-        if trip_id == "ALL" or trip_id == "OD":
-            continue
+    arcpy.management.MakeXYEventLayer(all_csv, "longitude", "latitude",
+                                      "all", SPATIAL_REF, "altitude")
+    try:
+        arcpy.conversion.FeatureClassToFeatureClass("all", SF_DIR, all_name)
+    except arcpy.ExecuteError:
+        print("file %s already exists" % os.path.join(SF_DIR, all_name))
 
-        trip_folder = os.path.join(source_date_folder, trip_id)
-        gp.workspace = trip_folder
-        all_points = os.path.join(trip_folder, r"ALL\points_"+trip_id+".shp")
-        od_points = os.path.join(trip_folder, r"OD\OD_"+trip_id+".shp")
-
-        print "\nDate: %s, Route %s" % (date, trip_id)
-        solve_trip(all_points, od_points, trip_id, date_folder)
+    arcpy.management.MakeXYEventLayer(od_csv, "longitude", "latitude",
+                                      "od", SPATIAL_REF, "altitude")
+    try:
+        arcpy.conversion.FeatureClassToFeatureClass("od", SF_DIR, od_name)
+    except arcpy.ExecuteError:
+        print("file %s already exists" % os.path.join(SF_DIR, od_name))
+    
+    return os.path.join(SF_DIR, all_name), os.path.join(SF_DIR, od_name)
 
 
 if __name__ == '__main__':
-    start_time = time.clock()
 
-    num_days = 35
-    start_date = datetime.date(2015, 8, 24)
-    date_list = [(start_date + datetime.timedelta(days=i)).strftime("%b_%d")
-                 for i in range(0, num_days)]
+    start_t = dt.datetime.now()
 
-    pool = multiprocessing.Pool()
-    pool.map(process_date, date_list)
-    pool.close()
-    pool.join()
-    #for date in date_list:
-    #    source_date_folder = os.path.join(ROOT_FOLDER, "Shapefiles", date)
-    #    if not os.path.exists(source_date_folder):
-    #        continue
-    #    arcpy.env.workspace = source_date_folder
+    trip_ids = set([os.path.splitext(f)[0] for f in os.listdir(INPUT_DIR) if not "_od.csv" in f])
+    print("Beginning to process %d trips from %s" % (len(trip_ids), INPUT_DIR))
+    for i, trip_id in enumerate(trip_ids):
+        print("\nProcessing trip %s" % trip_id)
+        try:
+            all_points, od_points = csv_to_shapefiles(trip_id)
+            solve_trip(all_points, od_points, trip_id, OUTPUT_CSV_FOLDER)
+        except:
+            print("ERROR: Trip %s could not be processed" % trip_id)
+            traceback.print_exc()
+        
+        if (i + 1) % 10 == 0:
+            print("Script has processed %d trips for %ds"
+                  % (i + 1, (dt.datetime.now() - start_t).total_seconds()))
 
-    #    date_folder = os.path.join(SPEED_DATA_FOLDER, date)
-    #    if not os.path.exists(date_folder):
-    #        os.makedirs(date_folder)
-
-    #    trip_dirs = next(os.walk(source_date_folder))[1]
-    #    for trip_id in trip_dirs:
-    #        if trip_id == "ALL" or trip_id == "OD":
-    #            continue
-
-    #        trip_folder = os.path.join(source_date_folder, trip_id)
-    #        gp.workspace = trip_folder
-    #        all_points = os.path.join(trip_folder, r"ALL\points_"+trip_id+".shp")
-    #        od_points = os.path.join(trip_folder, r"OD\OD_"+trip_id+".shp")
-
-    #        print "\nDate: %s, Route %s" % (date, trip_id)
-    #        solve_trip(all_points, od_points, trip_id, date_folder)
-
-    print("Program ran for days %s to %s" % (date_list[0], date_list[-1]))
-    print("Program ran for %ds" % (time.clock() - start_time))
+    print("\n\nSuccessfully finished processing trips")
+    print("Job took %ds" % (dt.datetime.now() - start_t).total_seconds())
 

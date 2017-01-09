@@ -1,3 +1,16 @@
+""" Script for verifying that recorded speed is correct
+
+Because we didn't have clear information on how the speed recorded by
+the app was measured, we wanted to verify that the speed was more or less correct.
+So, we estimated the cyclists' speeds using time deltas taken around the point, 
+calculating distance based on the haversine formula between the recorded lat/lon points.
+
+The result is that the speed estimate is very consistent; the haversine distance speed
+estimates seem to be larger than the recorded speeds because of persistent errors 
+that "wobble" the recorded lat/lon points around the true path, increasing the
+apparent path length (and thus increasing the apparent velocity).
+"""
+
 from collections import defaultdict
 import csv
 import datetime

@@ -16,7 +16,7 @@ from sklearn.neighbors import KernelDensity
 DATA_DIR = "Data"
 EMME_VOLUME_DATA = os.path.join(DATA_DIR, "EMME 2011 VOLUME SUMMARY.OCT2015.v2.csv")
 EMME_LINK_DATA = os.path.join(DATA_DIR, "EMME_link_data.csv")
-RAW_DATA_DIR = os.path.join(DATA_DIR, "Raw Data")
+RAW_DATA_DIR = os.path.join(DATA_DIR, "Geoprocessed Data", "Processed CSVs")
 CLEANED_DATA_DIR = os.path.join(DATA_DIR, "Cleaned Data")
 
 
@@ -26,19 +26,24 @@ def clean_trips(directory_name, cache_file=None, clean_users=True):
 
     csv_list = [os.path.join(directory_name, f) for f in os.listdir(directory_name) 
                 if os.path.splitext(f)[1] == ".csv"]
-    df_list = [pd.read_csv(csv, parse_dates=["RECORDED_A"])
+    print("Reading in data")
+    df_list = [pd.read_csv(csv, parse_dates=["STARTED_AT"])
                for csv in csv_list]
-    data = pd.concat([clean_trip(d) for d in trip_data_list])
+    print("Cleaning trips")
+    data = pd.concat([clean_trip(d) for d in df_list])
     data = clean_data(data, clean_users=clean_users)
+    print("Writing cleaned data to %s" % cache_file)
     data.to_csv(cache_file, encoding="utf8")
     print("Successfully wrote data to csv")
 
 
 def clean_trip(df):
     """Cleans a pandas dataframe corresponding to a single trip"""
+    df = df[df["CUMUL_METE"] != 0]
     df['trip_length'] = df['CUMUL_METE'].max()
+    df.loc[df["SIG_DIST"] < 0, "SIG_DIST"] = 1000
     return df
-    
+
 
 def add_bike_code(df):
     """Adds bike facility information to the data frame"""
