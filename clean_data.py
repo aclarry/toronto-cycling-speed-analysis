@@ -40,8 +40,10 @@ def clean_trips(directory_name, cache_file=None, clean_users=True):
 def clean_trip(df):
     """Cleans a pandas dataframe corresponding to a single trip"""
     df = df[df["CUMUL_METE"] != 0]
-    df['trip_length'] = df['CUMUL_METE'].max()
-    df.loc[df["SIG_DIST"] < 0, "SIG_DIST"] = 1000
+    trip_len = df['CUMUL_METE'].max()
+    df['trip_length'] = trip_len
+    df.loc[df["SIG_DIST"] < 0, "SIG_DIST"] = trip_len
+    df.loc[df["STOP_DIST"] < 0, "STOP_DIST"] = trip_len
     return df
 
 

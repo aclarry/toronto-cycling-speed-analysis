@@ -19,15 +19,18 @@ gp = arcgisscripting.create(9.3)
 arcpy.env.overwriteOutput = True
 arcpy.CheckOutExtension("Network")
 
-DATA_FOLDER = r"C:\Users\Andrew\Documents\UofT2016\Speed Analysis\toronto-cycling-speed-analysis\Data"
+DATA_FOLDER = r"D:\UofT 2016\Speed Analysis\toronto-cycling-speed-analysis\Data"
 INPUT_DIR = os.path.join(DATA_FOLDER, "Cut Data")
-OUTPUT_CSV_FOLDER = os.path.join(DATA_FOLDER, "Geoprocessed Data", "Processed CSVs")
+#OUTPUT_CSV_FOLDER = os.path.join(DATA_FOLDER, "Geoprocessed Data", "Processed CSVs")
 SF_DIR = os.path.join(DATA_FOLDER, "Geoprocessed Data", "Shapefiles")
+OUTPUT_CSV_FOLDER = os.path.join(DATA_FOLDER, "Geoprocessed Data", "Processed CSVs - New")
+#SF_DIR = os.path.join(DATA_FOLDER, "Geoprocessed Data", "Shapefiles - New")
 
 NETWORK_GDB = r"D:\UofT 2016\Kathryn Choiceset Generation\Network_with_Emme\CalibratedNetworkJuly26\CalibratedNetworkJuly26.gdb"
 NETWORK_DATASET = NETWORK_GDB + r"\dataset\dataset_ND"
 CENTRELINE_LINKS = NETWORK_GDB + r"\dataset\Calibrated_July26"
 SIGNALIZED_INTERSECTION_PATH = NETWORK_GDB + r"\Centreline_JunctionswithSignals"
+STOP_SIGNS_FILE = NETWORK_GDB + r"\stop_signs"
 
 ACCUMULATORS = ("Meters",)
 
@@ -93,6 +96,7 @@ def solve_trip(observed_points, od_points, trip_id, results_folder, BUFF_SIZE=50
                                join_type="KEEP_ALL",
                                match_option="CLOSEST", search_radius="100 Meters")
     add_intersection_distances(out_points_name, split_route, SIGNALIZED_INTERSECTION_PATH)
+    add_stopsign_distances(out_points_name, split_route)
     out_route_csv = os.path.join(results_folder, trip_id+".csv")
     export_features_to_csv(out_points_name, out_route_csv)
 
@@ -111,6 +115,30 @@ def add_intersection_distances(observed_points, route, junction_file):
     arcpy.management.CalculateField(observed_points, "sig_dist",
                                     "!NEAR_DIST!", "PYTHON_9.3")
     
+def add_stopsign_distances(observed_points, route):
+    print("Adding stop sign distances for route %s" % os.path.basename(route))
+    route_signs = os.path.join(os.path.dirname(route), "stop_signs_tmp.shp")
+    route_from_signs = os.path.join(os.path.dirname(route), "stop_signs_trimmed_tmp.shp")
+    arcpy.analysis.SpatialJoin(STOP_SIGNS_FILE, route, route_signs,
+                        join_operation="JOIN_ONE_TO_ONE",
+                        join_type="KEEP_COMMON",
+                        match_option="WITHIN_A_DISTANCE", search_radius="5 Meters")
+    arcpy.analysis.SpatialJoin(route_signs, CENTRELINE_LINKS, route_from_signs,
+                        join_operation="JOIN_ONE_TO_MANY",
+                        join_type="KEEP_COMMON",
+                        match_option="WITHIN_A_DISTANCE", search_radius="5 Meters")
+    stop_table_view = "stopSignsView"
+    condition = arcpy.AddFieldDelimiters(stop_table_view, "Stop_Stree") + " = " + arcpy.AddFieldDelimiters(stop_table_view, "LF_NAME")
+    arcpy.management.MakeTableView(route_from_signs, stop_table_view)
+    arcpy.management.SelectLayerByAttribute(stop_table_view, "NEW_SELECTION", condition)
+    arcpy.DeleteRows_management(stop_table_view)
+    # Here we need to delete the points where the "stop street" isn't a street travelled by the cyclist
+    arcpy.analysis.Near(observed_points, route_from_signs, method="GEODESIC")
+    #arcpy.management.Delete(route_signs)
+    #arcpy.management.Delete(route_from_signs)
+    arcpy.management.AddField(observed_points, "stop_dist", "DOUBLE")
+    arcpy.management.CalculateField(observed_points, "stop_dist",
+                                    "!NEAR_DIST!", "PYTHON_9.3")
 
 def get_split_solved_route(na_layer, split_route_output, results_folder, trip_id, 
         copy_id="OBJECTID"):
@@ -188,7 +216,7 @@ def export_features_to_csv(split_route, out_csv_name):
                           "cyclingfre", "age", "cycling_le", "gender", "rider_type",
                           "schoolzip", "homezip", "cyclingexp"))
     trip_fields = ";".join(("purpose", "FID", "Cumul_Mete"))
-    road_fields = ";".join(("LF_NAME", "ONE_WAY_DI", "sig_dist", "SourceOID",
+    road_fields = ";".join(("LF_NAME", "ONE_WAY_DI", "sig_dist", "stop_dist", "SourceOID",
                             "SLOPE_TF", "Shape_Leng", "RDCLASS", "Bike_Class",
                             "Bike_Code", "EMME_MATCH", "EMME_CONTR", "link_dir"))
     fields = ";".join((gps_fields, user_fields, trip_fields, road_fields))
@@ -227,17 +255,27 @@ if __name__ == '__main__':
     print("Beginning to process %d trips from %s" % (len(trip_ids), INPUT_DIR))
     for i, trip_id in enumerate(trip_ids):
         print("\nProcessing trip %s" % trip_id)
+        '''
         try:
             all_points, od_points = csv_to_shapefiles(trip_id)
             solve_trip(all_points, od_points, trip_id, OUTPUT_CSV_FOLDER)
         except:
             print("ERROR: Trip %s could not be processed" % trip_id)
             traceback.print_exc()
+        '''
+        
+        split_route = os.path.join(SF_DIR, trip_id+"_observed_route.shp")
+        out_points_name = os.path.join(SF_DIR, trip_id+"_points.shp")
+        if os.path.exists(split_route) and os.path.exists(out_points_name):
+            add_stopsign_distances(out_points_name, split_route)
+            out_route_csv = os.path.join(OUTPUT_CSV_FOLDER, trip_id+".csv")
+            export_features_to_csv(out_points_name, out_route_csv)
         
         if (i + 1) % 10 == 0:
             print("Script has processed %d trips for %ds"
                   % (i + 1, (dt.datetime.now() - start_t).total_seconds()))
-
+        #if i > 1:
+        #    break
     print("\n\nSuccessfully finished processing trips")
     print("Job took %ds" % (dt.datetime.now() - start_t).total_seconds())
 
